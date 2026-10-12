@@ -1,0 +1,55 @@
+name: Issue 184 Windows regression (fork-only)
+on:
+  push:
+    branches: [codex/issue184-windows-regression]
+permissions:
+  contents: read
+jobs:
+  timestamp-write:
+    if: github.repository == 'fallenmi/acconeer-python-exploration'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Original RED and patched GREEN with offline stub executables
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          cmd.exe /d /c ver
+          [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+          $baseline = Join-Path $env:RUNNER_TEMP 'issue184_baseline'
+          New-Item -ItemType Directory -Path $baseline -ErrorAction Stop | Out-Null
+          $baselineFile = Join-Path $baseline 'update.bat'
+          cmd.exe /d /c "git show 3c6c9c2b8921c3a74770ab124255fe6a7f7cf2ce:internal_tools/portable/package_contents/update.bat > `"$baselineFile`""
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to materialize exact original blob' }
+          $originalBlob = (git hash-object $baselineFile).Trim()
+          if ($originalBlob -ne 'e47350eca2f313ea378a09d26563b623ed96743a') { throw 'Original blob mismatch' }
+          $fixedBlob = (git rev-parse HEAD:internal_tools/portable/package_contents/update.bat).Trim()
+          if ($fixedBlob -ne '87fc15330247027b77166d97e20846bf320431e7') { throw 'Patched blob mismatch' }
+          Write-Host "ORIGINAL_BLOB=$originalBlob PATCHED_BLOB=$fixedBlob"
+          $harness = Join-Path $env:RUNNER_TEMP 'test_issue184.cmd'
+          $text = [System.IO.File]::ReadAllText("$pwd/internal_tools/portable/test_issue184.cmd")
+          $text = $text.Replace("`r`n", "`n").Replace("`n", "`r`n")
+          [System.IO.File]::WriteAllText($harness, $text, [System.Text.Encoding]::ASCII)
+          $oldOutput = & cmd.exe /d /c "call `"$harness`" `"$baseline`"" 2>&1
+          $oldExit = $LASTEXITCODE
+          $oldOutput | ForEach-Object { Write-Host $_ }
+          if ($oldExit -ne 1 -or ($oldOutput -join "`n") -notmatch '6 check\(s\) failed') {
+            throw "Original did not reproduce the six expected assertion failures: exit=$oldExit"
+          }
+          $fixed = Join-Path $pwd 'internal_tools/portable/package_contents'
+          $newOutput = & cmd.exe /d /c "call `"$harness`" `"$fixed`"" 2>&1
+          $newExit = $LASTEXITCODE
+          $newOutput | ForEach-Object { Write-Host $_ }
+          if ($newExit -ne 0 -or ($newOutput -join "`n") -notmatch 'ALL PASS') {
+            throw "Patched regression failed: exit=$newExit"
+          }
+          Write-Host 'VERIFIED: original RED, patched GREEN; four cases each, no sensor/uv/network dependency'
